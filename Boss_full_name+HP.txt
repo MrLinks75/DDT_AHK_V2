@@ -1,0 +1,129 @@
+; protoDDT boss data - the single source of truth for names, HP and health breaks
+; Format: "Exact On-Screen Name" = HP ,breaks
+; breaks = health breaks in the HP pool (1 = final stand; Shuro Chi = 5 chunks
+; of health damage-gated by encounter mechanics)
+; "(No Boss HP bar)" marks bosses without a bottom health bar - the OCR
+; detection ignores them
+; Entries under a header containing (Epic) or PANTHEON are variants of their
+; regular counterparts; the active variant is picked by the Encounter Context
+; setting / hotkey
+
+RAIDS
+Last Wish
+"Kalli, the Corrupted" = 299440 ,0
+"Shuro Chi, the Corrupted" = 253511 ,5
+"Morgeth, the Spirekeeper" = 125126 ,0
+"Riven of a Thousand Voices" = 170255 (includes final stand) ,1
+
+Garden Of Salvation
+"Consecrated Mind, Sol Inherent" = 153455 ,0
+"Sanctified Mind, Sol Inherent" = 196586 ,0
+
+Deep Stone Crypt
+"Crypt Security" = 12117 ,0
+"Atraks-1, Fallen Exo" = 76035 (includes final stand) ,1
+"Taniks, the Abomination" = 277639 (includes final stand) ,1
+
+Vault of Glass
+"The Templar" = 182640 ,0
+"Atheon, Time's Conflux" = 247148 ,0
+
+Vow Of The Disciple
+"The Caretaker" = 663786 (includes final stand) ,1
+"Rhulk, Disciple of the Witness" = 397638 (includes final stand) ,1
+
+King's Fall
+"Warpriest" = 480831 ,0
+"Golgoroth" = 409156 ,0
+"Daughters" = 167594 (No Boss HP bar) ,0
+"Oryx, the Taken King" = 423189 (includes final stand) ,1
+
+Root Of Nightmares
+"Zo'Aurc, Explicator of Planets" = 295535 (includes final stand) ,1
+"Nezarec, Final God of Pain" = 262082 (includes final stand) ,1
+
+Crota's End
+"Ir Yût, the Deathsinger" = 288027 ,0
+"Crota, Son of Oryx" = 480445 (includes final stand) ,1
+
+Salvation's Edge
+"Herald of Finality" = 391079 (includes final stand) ,1
+"The Witness" = 543552 (includes final stand) ,1
+
+Desert Perpetual
+"Epoptes, Lord of Quanta" = 537446 ,0
+"Agraios, Inherent" = 530451 ,0
+"Iatros, Inward-Turned" = 250154 ,0
+"Koregos, the Worldline" = 756068 (includes final stand) ,1
+
+Desert Perpetual (Epic)
+"Epoptes, Lord of Quanta" = 554669 ,0
+"Agraios, Inherent" = 339461 ,0
+"Iatros, Inward-Turned" = 272822 ,0
+"Koregos, Fractured in Time" = 761063 (includes final stand) ,1
+
+PANTHEON
+"Argos, Planetary Core" = 546424 ,0
+"Warpriest" = 868185 ,0
+"Gahlran, The Sorrow-Bearer" = 494519 ,0
+"Consecrated Mind, Sol Inherent" = 387082 ,0
+"Emperor Calus" = 13122129 ,0
+"Morgeth, The Spirekeeper" = 794380 (includes final stand) ,1
+"Insurrection Prime, Kell's Scourge" = 515675 ,0
+
+DUNGEONS
+Shattered Throne
+"Vorgeth, the Boundless Hunger" = 23163 (No Boss HP bar) ,0
+"Dul Incaru, the Eternal Return" = 214959 ,0
+
+Pit Of Heresy
+"Zulmak, Instrument of Torment" = 61752 ,0
+
+Prophecy
+"Phalanx Echo" = 49678 ,0
+"Kell Echo" = 105803 ,0
+
+Grasp of Avarice
+"Phry'zhia the Insatiable" = 101053 ,0
+"Captain Avarokk the Covetous" = 111700 ,0
+
+Duality
+"Nightmare of Gahlran, Sorrow Bearer" = 133133 ,0
+"Nightmare of Caiatl, Princess-Imperial" = 117486 ,0
+
+Spire of the Watcher
+"Akelous, the Siren's Current" = 112294 ,0
+"Persys, Primordial Ruin" = 148907 ,0
+
+Ghosts of the Deep
+"Ecthar, the Shield of Savathûn" = 180621 ,0
+"Šimmumah Ur-Nokru" = 144404 ,0
+
+Warlord's Ruin
+"Rathil, First Broken Knight of Fikrul" = 112393 ,0
+"Locus of Wailing Grief" = 239073 ,0
+"Hefnd's Vengeance, Blighted Chimaera" = 254999 ,0
+
+Vesper's Host
+"Raneiks Unified" = 224291 ,0
+"The Corrupted Puppeteer" = 325278 ,0
+
+Sundered Doctrine
+"Zoetic Lockset" = 205547 ,0
+"Kerrev, the Erased" = 296370 ,0
+
+Equilibrium
+"Harrow, Dredgen-Apprentice" = 206963 ,0
+"Dredgen Sere" = 143884 ,0
+
+Practice Range
+"C.A.R.L., Dummy of Practice" = 1500000 ,0
+
+TESTING
+"Savathûn, the Witch Queen" = 249945 ,1
+"Testing (final)" = 10000000 ,1
+"Testing (no final)" = 10000000 ,0
+"default" = 100 ,0
+"default with final stand" = 100 ,1
+
+"Ravenous Ogre" = 1009328 ,0
