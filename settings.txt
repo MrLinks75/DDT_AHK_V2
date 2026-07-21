@@ -10,7 +10,7 @@ Manually Start and Stop DPS Phases       = false
 Start And Stop DPS Phase                 = F3
 Detect Boss Hotkey                       = F7
 Auto Detect Boss                         = true
-Auto Detect Interval Seconds             = 3
+Auto Detect Interval Seconds             = 1
 Encounter Context                        = normal
 Encounter Context Hotkey                 = F10
 Context options are: normal, epic, pantheon - picks between same-named bosses
@@ -78,3 +78,5 @@ Brightness Level                         = 7
 Supported brightness options are: 2, 3, 4, 5, 6, 7
 Lower brightness options may be less consistent
 Graph Layout                             = 1329|416|529|205
+Healthbar Location                       = 
+Bossname Location                        = 

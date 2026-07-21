@@ -127,3 +127,4 @@ TESTING
 "default with final stand" = 100 ,1
 
 "Ravenous Ogre" = 1009328 ,0
+"Captain" = 1933066 ,0

@@ -1,0 +1,5 @@
+# CSV logs written by the F6 damage test
+*.csv
+*.zip
+# per-session tracking output (phase history, graph PNGs, measurement logs)
+Tracking/

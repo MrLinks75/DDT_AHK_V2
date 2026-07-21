@@ -75,6 +75,7 @@ settingsGui.Add("Edit", "w150 vMeasureName")
 settingsGui.Add("Button", , "Measure").OnEvent("Click", ButtonMeasure)
 settingsGui.Add("Text", "y+12", "— Screen setup —")
 settingsGui.Add("Button", , "Calibrate bar location").OnEvent("Click", calibrate_bar)
+settingsGui.Add("Button", "x+8", "Reset calibration").OnEvent("Click", flush_calibration)
 
 global quickGui := ""  ; the F2 quick menu, built lazily on first open
 global ColorBlind := "Normal"
@@ -105,7 +106,7 @@ global showDamageDuration := 0
 global estimateTimeToKill := 0
 global res1080p := 0
 global autoDetectBoss := 1             ; scan for the boss name automatically when a bar is visible
-global autoDetectIntervalSeconds := 3
+global autoDetectIntervalSeconds := 1
 global tracking_active := false
 global current_boss := ""
 global switch_to_boss := ""            ; set by detection to retarget the running tracker
@@ -117,6 +118,7 @@ global phaseEndFrozenSeconds := 8      ; frozen-bar time that ends a phase
 global showDPSGraph := 1
 global graph_curves := 7          ; bitmask: 1 = real-time dps, 2 = peak dps, 4 = total damage
 global dpsWindowSeconds := 1      ; window for the real-time dps curve/label
+global dps_effective_window := 1  ; auto-widened on sparse (column-stepped) damage
 global graphLayoutOverride := ""  ; "x|y|w|h" saved from in-game edit mode
 global healthbarLocationOverride := ""  ; "x|y|w|h" written by the calibration wizard
 global bossnameLocationOverride := ""
@@ -173,8 +175,9 @@ if (separateWindow)
     }
 
     ; label:value grid, two columns: burst / sustained then duration / time to kill
+    ; the numbers are tied to the specifiers: no labels, no numbers
     yRow := 96
-    if (includeDPSCalculations) {
+    if (includeDPSCalculations && includeBurstAndSustainedSpecifiers) {
         bossGui.SetFont("s11")
         bossGui.Add("Text", "x10 y" yRow " w195 h16 vGUI_burst +0x200 +Center")
         bossGui.Add("Text", "x215 y" yRow " w195 h16 vGUI_sustained +0x200 +Center")
@@ -403,7 +406,8 @@ init_graph()
     graph_obm := SelectObject(graph_hdc, graph_hbm)
     graph_G := Gdip_GraphicsFromHDC(graph_hdc)
     Gdip_SetSmoothingMode(graph_G, 4)
-    SetTimer(graph_tick, 200)
+    SetTimer(graph_tick, 100)  ; ~10 samples/s; the dps curve stays readable
+                               ; because it's windowed over dpsWindowSeconds
     OnMessage(0x201, graph_click)  ; WM_LBUTTONDOWN: drag in edit mode
 }
 
@@ -703,6 +707,35 @@ bossHealthPercentage(pBitmap, has_final := 0)
             run := 0
         x -= 1
     }
+    ; contiguity check: a real healthbar extends from its left edge to the
+    ; health edge. small warm-white UI elements (the inventory's scroll pill
+    ; renders right where the bar lives) pass the color match but only span a
+    ; few columns with NOTHING to their left. deliberately loose - only 2 of
+    ; 8 probes need a match - because the bar's translucent middle is often
+    ; darkened by effects/enemies behind it and must never read as "no bar"
+    ; (a strict version here made readings flicker to 0 all fight long). a
+    ; ~20px pill scores 0-1: all probes sit at <=85% of the edge, left of it
+    if (edge > 24)
+    {
+        probe_hits := 0
+        for frac in [0.05, 0.15, 0.28, 0.4, 0.52, 0.64, 0.76, 0.85]
+        {
+            px := Integer((edge - 1) * frac)
+            y := 0
+            loop h
+            {
+                argb := use_lb ? NumGet(scan0, px*4 + y*stride, "UInt") : Gdip_GetPixel(pBitmap, px, y)
+                if (bar_pixel_match(argb))
+                {
+                    probe_hits += 1
+                    break
+                }
+                y += 1
+            }
+        }
+        if (probe_hits < 2)
+            edge := 0
+    }
     if (use_lb)
         Gdip_UnlockBits(pBitmap, &bmpData)
     if (!edge)
@@ -733,7 +766,7 @@ median3(a, b, c)
     return a + b + c - Max(a, b, c) - Min(a, b, c)
 }
 
-; samples dps during a phase and drives the graph window lifecycle (200ms timer)
+; samples dps during a phase and drives the graph window lifecycle (100ms timer)
 graph_tick()
 {
     global
@@ -763,7 +796,7 @@ graph_tick()
         graph_samples.Push([elapsed_time, current_dps, total_damage])
         ; very long phases: thin to every other sample so render cost and
         ; memory stay flat (timestamps keep the curves' shape correct)
-        if (graph_samples.Length > 2400)
+        if (graph_samples.Length > 6000)  ; 10 min at 10/s before thinning
         {
             thinned := []
             Loop graph_samples.Length // 2
@@ -857,12 +890,13 @@ graph_render_body()
         {
             i := A_Index
             j := i
-            while (j > 1 && graph_samples[i][1] - graph_samples[j-1][1] < dpsWindowSeconds)
+            while (j > 1 && graph_samples[i][1] - graph_samples[j-1][1] < dps_effective_window)
                 j -= 1
             ; divide by at least the full window: early samples with only a
             ; sliver of history would otherwise multiply one hp-column step
-            ; into a huge fake spike
-            span := Max(graph_samples[i][1] - graph_samples[j][1], dpsWindowSeconds)
+            ; into a huge fake spike. the window self-widens on sparse
+            ; column-stepped damage (see the tracker's adaptive window)
+            span := Max(graph_samples[i][1] - graph_samples[j][1], dps_effective_window)
             inst_val := (graph_samples[i][3] - graph_samples[j][3]) / span
             inst_series.Push(inst_val)
             run_peak := Max(run_peak, inst_val)
@@ -1004,6 +1038,13 @@ build_quick_menu()
     quickGui.Add("Checkbox", "xm w330 vQMAutoDetect", "Auto boss detection (OCR)").OnEvent("Click", qm_autodetect)
 
     quickGui.SetFont("Bold")
+    quickGui.Add("Text", "xm y+10", "Screen / resolution")
+    quickGui.SetFont("Norm")
+    quickGui.Add("DropDownList", "xm w190 vQMResolution",
+        ["2560x1440 (default)", "1920x1080", "Ultrawide 1440p", "Custom (calibrate now)"]).OnEvent("Change", qm_resolution)
+    quickGui.Add("Button", "x+10 w130", "Flush custom").OnEvent("Click", flush_calibration)
+
+    quickGui.SetFont("Bold")
     quickGui.Add("Text", "xm y+10", "Actions")
     quickGui.SetFont("Norm")
     quickGui.Add("Button", "xm w160", "Detect boss now   [F7]").OnEvent("Click", (*) => detect_boss())
@@ -1033,6 +1074,8 @@ quick_menu_sync()
         quickGui["QMManual"].Value := manualDPSPhases ? 1 : 0
         quickGui["QMAutoDetect"].Value := autoDetectBoss ? 1 : 0
         quickGui["QMContext"].Text := "Context: " encounterContext "   [F10]"
+        quickGui["QMResolution"].Value := res1080p ? 2 : isUltraWide ? 3
+            : (healthbarLocationOverride != "" ? 4 : 1)
     }
 }
 
@@ -1095,6 +1138,43 @@ qm_autodetect(ctrl, *)
     save_setting("Auto Detect Boss", autoDetectBoss ? "true" : "false")
 }
 
+; resolution picker: the base layouts and default regions are resolution-
+; dependent, so switching reloads the script; "Custom" runs the calibration
+; wizard instead (it overrides the regions on top of whatever base is set)
+qm_resolution(ctrl, *)
+{
+    global
+    if (ctrl.Value = 4)
+    {
+        quickGui.Hide()
+        calibrate_bar()
+        return
+    }
+    save_setting("1920x1080", ctrl.Value = 2 ? "true" : "false")
+    save_setting("Ultrawide 1440p Monitor", ctrl.Value = 3 ? "true" : "false")
+    Reload
+}
+
+; failsafe: wipe a mistyped / misclicked custom calibration and fall back to
+; the built-in per-resolution regions
+flush_calibration(*)
+{
+    global healthbarLocationOverride, bossnameLocationOverride
+    ; settings.txt is the source of truth: also catch values saved by an
+    ; earlier session (or edited by hand) that the globals don't know about
+    saved_in_file := 0
+    try saved_in_file := RegExMatch(FileRead(A_ScriptDir "\settings.txt"), "m)^(Healthbar|Bossname) Location\s*=\s*\S")
+    if (!saved_in_file && healthbarLocationOverride = "" && bossnameLocationOverride = "")
+    {
+        ToolTip "No custom calibration saved - nothing to flush", 100, 100
+        SetTimer(clear_tooltip, -2000)
+        return
+    }
+    save_setting("Healthbar Location", "")
+    save_setting("Bossname Location", "")
+    Reload
+}
+
 qm_context(ctrl, *)
 {
     global encounterContext
@@ -1107,6 +1187,7 @@ qm_context(ctrl, *)
 calibrate_bar(*)
 {
     global healthbar_location, bossname_location, stop_loop
+    global healthbarLocationOverride, bossnameLocationOverride
     stop_loop := 1  ; stop any running tracker so the region switch is clean
     CoordMode "Mouse", "Screen"
     ToolTip "Calibration 1/2:`nhover the mouse over the LEFT end of the boss healthbar,`nthen press Space (Esc cancels)", 100, 100
@@ -1137,6 +1218,10 @@ calibrate_bar(*)
     bossname_location := x1 "|" (bary + 5) "|" Round(barw * 0.71) "|40"
     save_setting("Healthbar Location", healthbar_location)
     save_setting("Bossname Location", bossname_location)
+    ; keep the in-memory overrides in sync, or the resolution menu and the
+    ; flush failsafe won't see this calibration until the next reload
+    healthbarLocationOverride := healthbar_location
+    bossnameLocationOverride := bossname_location
     ToolTip "Calibrated:`nhealthbar " healthbar_location "`nname region " bossname_location "`nsaved to settings.txt", 100, 100
     SetTimer(clear_tooltip, -3500)
 }
@@ -1515,8 +1600,9 @@ update_best_record()
 ; recorded to the history either
 end_dps_phase(dump_graph := false)
 {
-    global dps_phase_active, total_damage, highest_dps
+    global dps_phase_active, total_damage, highest_dps, dps_start_time
     global includeDPSCalculations, showDamageDuration, estimateTimeToKill
+    global includeBurstAndSustainedSpecifiers, DPSatCrosshair
     global graph_samples, graph_linger_until, graph_visible, graphGui
     global current_boss, current_dps, elapsed_time, boss_max_hp
     global phase_peak_dps, phase_hp_start, phase_hp_end, phase_killed, phase_ttfd
@@ -1553,6 +1639,23 @@ end_dps_phase(dump_graph := false)
                 . Round(phase_hp_start, 2) "," Round(phase_hp_end, 2) ","
                 . phase_killed "," phases_left "`r`n", csv_path
             save_graph_png(dir "\phase_" attempt "_" A_Hour "-" A_Min "-" A_Sec ".png")
+            ; full-resolution time series, ~10 rows/s: sampled by the tracker
+            ; loop itself (burst_hist), so it exists even with the graph off.
+            ; dps_1s is the trailing-1s dps, matching the graph's dps curve
+            if (burst_hist.Length >= 2)
+            {
+                ts := "time_s,total_damage,dps_1s`r`n"
+                j := 1
+                for e in burst_hist
+                {
+                    while (e[1] - burst_hist[j][1] > 1000)
+                        j += 1
+                    span := (e[1] - burst_hist[j][1]) / 1000
+                    dps1 := (span > 0) ? Round((e[2] - burst_hist[j][2]) / span) : 0
+                    ts .= Round((e[1] - dps_start_time) / 1000, 2) "," Round(e[2]) "," dps1 "`r`n"
+                }
+                FileAppend ts, dir "\phase_" attempt "_" A_Hour "-" A_Min "-" A_Sec "_data.csv"
+            }
             beat_record := update_best_record()
         }
         last_phase_summary := current_boss (attempt ? " #" attempt : "") " - " elapsed_time "s, "
@@ -1583,7 +1686,7 @@ end_dps_phase(dump_graph := false)
             graph_visible := false
         }
     }
-    if (includeDPSCalculations)
+    if (includeDPSCalculations && (includeBurstAndSustainedSpecifiers || DPSatCrosshair))
     {
         gset("HighestDPS", 0)
         gset("AverageDPS", 0)
@@ -1646,9 +1749,10 @@ calculateDPS(bossName)
     global boss_health_pool, boss_final_stand, healthbar_location, currently_shown
     global manualDPSPhases, showDamageDealt, showDamageDuration, estimateTimeToKill
     global includeDPSCalculations, includeEstimatedBossHealth, decimalPlacesHealthPercentage
+    global includeBurstAndSustainedSpecifiers, DPSatCrosshair
     global tracking_active, current_boss, switch_to_boss
-    global dpsWindowSeconds, phase_peak_dps, phase_hp_start, phase_hp_end, phase_killed
-    global phase_ttfd, burst_hist
+    global dpsWindowSeconds, dps_effective_window, phase_peak_dps, phase_hp_start, phase_hp_end, phase_killed
+    global phase_ttfd, burst_hist, graph_samples, showDPSGraph
 
     tracking_active := true
     current_boss := bossName
@@ -1656,6 +1760,7 @@ calculateDPS(bossName)
     stop_loop := 0
     set_tracker_state("locked")
     last_boss_hp_percent := -1
+    last_fast_hp := -1  ; previous pre-envelope (median-only) reading
     time_of_last_damage := A_TickCount
     current_dps := 0
     hp_hist := []  ; last few raw readings, median-filtered to reject one-frame flashes
@@ -1663,11 +1768,13 @@ calculateDPS(bossName)
     env_window_ms := 1200  ; boss hp never rises mid-fight, so the max reading over this
                            ; window is the truth; occlusion dips shorter than it vanish
     bar_hidden := false
+    unhide_warmup := 0  ; ticks to skip after the bar returns (partial renders)
     last_good_hp := -1  ; last reading where the bar was actually visible
     pending_baseline := -1  ; hp before a not-yet-confirmed drop (sustained phase start)
     pending_drop_tick := 0
     hidden_since := 0       ; when the bar disappeared (menu opened)
     last_unhide_tick := 0   ; when the bar last came back
+    last_hidden_ms := 0     ; how long that last blackout was
     quarantine_active := false
     quarantine_since := 0
     quarantine_low := 0     ; lowest reading seen while quarantined
@@ -1675,6 +1782,8 @@ calculateDPS(bossName)
     phase_min_hp := 999          ; lowest believed hp this phase; damage only counts below it
     phase_total_baseline := 999  ; hp the phase's damage total is measured from
     peak_hist := []              ; [tick, total] pairs for the rolling peak-dps window
+    last_damage_event_tick := 0  ; when damage last actually counted
+    damage_gap_s := 0            ; smoothed spacing between damage events
     bar_seen_tick := A_TickCount ; when the bar (re)appeared - start of the ttfd clock
 
     boss_max_hp := boss_health_pool.Get(bossName, 0)
@@ -1714,6 +1823,7 @@ calculateDPS(bossName)
                     end_dps_phase()
                     current_dps := 0
                     last_boss_hp_percent := -1
+                    last_fast_hp := -1
                     last_good_hp := -1
                     bar_hidden := false
                     pending_baseline := -1
@@ -1764,6 +1874,7 @@ calculateDPS(bossName)
                 bar_seen_tick := A_TickCount
                 last_good_hp := -1
                 last_boss_hp_percent := -1
+                last_fast_hp := -1
                 bar_hidden := false
                 pending_baseline := -1
                 phase_start_baseline := 999
@@ -1798,8 +1909,14 @@ calculateDPS(bossName)
                 {
                     bar_hidden := false
                     last_unhide_tick := A_TickCount
+                    last_hidden_ms := A_TickCount - hidden_since
                     hp_hist := []
                     env_hist := []
+                    ; the first frames after a menu closes can catch the bar
+                    ; mid-render (partially filled) - refill the median window
+                    ; before trusting any reading, or a single bad frame
+                    ; becomes phantom mega-damage
+                    unhide_warmup := 2
                 }
                 ; quarantined readings are suspect - keeping them out of
                 ; last_good_hp stops a false menu bar from sneaking in through
@@ -1812,6 +1929,23 @@ calculateDPS(bossName)
             if (hp_hist.Length > 3)
                 hp_hist.RemoveAt(1)
             boss_hp_percent := (hp_hist.Length = 3) ? median3(hp_hist[1], hp_hist[2], hp_hist[3]) : raw_hp
+
+            ; still warming up after the bar returned: collect samples for the
+            ; median window but act on nothing
+            if (unhide_warmup > 0)
+            {
+                unhide_warmup -= 1
+                Gdip_DisposeImage(pBitmap)
+                Sleep 30
+                continue
+            }
+
+            ; pre-envelope reading for phase-START detection only: the envelope
+            ; below holds the max of the last 1.2s, which used to add its full
+            ; window to the time before a phase (and its graph) could begin.
+            ; the pending-drop confirm logic has its own noise rejection, so it
+            ; can safely watch the faster median-only value
+            fast_hp := boss_hp_percent
 
             ; envelope filter: report the max reading of the last env_window_ms, so dips
             ; from things glowing/moving behind the translucent bar never count as damage
@@ -1857,15 +1991,18 @@ calculateDPS(bossName)
                     quarantine_low := Min(quarantine_low, boss_hp_percent)
                     if (!keeps_sinking && A_TickCount - quarantine_since < bigDropConfirmSeconds * 1000)
                         boss_hp_percent := last_boss_hp_percent  ; hold
-                    else if (!keeps_sinking && (last_boss_hp_percent - boss_hp_percent) > 40
-                        && ocr_detect_name() = "")
+                    else if (!keeps_sinking && ocr_detect_name() = "")
                     {
-                        ; a huge flat collapse with no boss name on screen is a
-                        ; menu, not damage: character-screen UI (gold icon
-                        ; borders under parallax) can read as a tiny false bar.
+                        ; a flat collapse of ANY size with no boss name on
+                        ; screen is a menu, not damage: character-screen UI
+                        ; (gold icon borders under parallax) can read as a
+                        ; false bar anywhere from a sliver to half full, and
+                        ; accepting one used to spike the phase by millions.
                         ; keep holding the real value and re-check every 2s -
                         ; when the menu closes the name comes back and any
-                        ; teammate catch-up damage is accepted then
+                        ; teammate catch-up damage is accepted then. real
+                        ; one-shot mechanics keep their name on screen, so
+                        ; they still get accepted after the confirm window
                         quarantine_since := A_TickCount + 2000 - bigDropConfirmSeconds * 1000
                         boss_hp_percent := last_boss_hp_percent
                     }
@@ -1874,6 +2011,8 @@ calculateDPS(bossName)
                         quarantine_active := false
                         hidden_since := quarantine_since
                         last_unhide_tick := A_TickCount
+                        ; an accepted hold released this much compressed damage
+                        last_hidden_ms := Max(A_TickCount - quarantine_since, 0)
                     }
                 }
                 else
@@ -1894,28 +2033,53 @@ calculateDPS(bossName)
                 boss_total_health := FormatWithCommas(Round((boss_hp_percent/100)*boss_max_hp, 0))
 
             ; auto phase start: the drop has to be big enough and persist long enough
-            ; that one or two noisy pixels can't trigger a phase
-            if (!dps_phase_active && !manualDPSPhases && last_boss_hp_percent >= 0)
+            ; that one or two noisy pixels can't trigger a phase. watches the
+            ; pre-envelope fast_hp so the phase (and graph) starts ~1s sooner;
+            ; a phantom start from a short occlusion dip recovers and dumps
+            ; itself via the full-recovery check further down
+            if (!dps_phase_active && !manualDPSPhases && last_fast_hp >= 0
+                && !bar_hidden && !quarantine_active)
             {
-                if (boss_hp_percent > last_boss_hp_percent)
+                ; the 0.001 tolerance matters: median3/envelope arithmetic
+                ; wobbles by ~1e-13 when the filter window's composition
+                ; changes, and a bare > read that as "rising" and cancelled
+                ; pending trickle drops right before they could confirm
+                if (fast_hp > last_fast_hp + 0.001)
                     pending_baseline := -1  ; bar is rising (spawn/respawn fill) - damage never raises it
-                else if (pending_baseline < 0 && boss_hp_percent < last_boss_hp_percent)
+                else if (pending_baseline < 0 && fast_hp < last_fast_hp)
                 {
-                    pending_baseline := last_boss_hp_percent
+                    pending_baseline := last_fast_hp
                     pending_drop_tick := A_TickCount
                 }
-                else if (pending_baseline >= 0 && boss_hp_percent >= pending_baseline)
+                else if (pending_baseline >= 0 && fast_hp >= pending_baseline)
                     pending_baseline := -1  ; recovered, it was noise
 
-                ; fast path: a clear drop confirmed quickly. trickle path: even a
-                ; single-column drop is real if it survives 3x the confirm window,
-                ; because rises cancel pending and noise always bounces back -
-                ; this is what lets slow solo damage start a phase promptly
-                pending_drop := (pending_baseline >= 0) ? pending_baseline - boss_hp_percent : 0
+                ; ANY believable drop (>= 0.05%, under half a bar column) that
+                ; survives the confirm window starts the phase. high-HP bosses
+                ; shed bar columns slowly, so nearly every start there is a
+                ; single-column "trickle" - the old 3x confirm window for
+                ; small drops added a flat second before the graph could
+                ; begin. noise dips recover and cancel pending within the
+                ; window; the rare one that persists starts a phase that
+                ; self-dumps on full recovery. phaseStartMinDrop still lowers
+                ; the threshold further if a user sets it under 0.05
+                pending_drop := (pending_baseline >= 0) ? pending_baseline - fast_hp : 0
                 pending_held := A_TickCount - pending_drop_tick
-                if (pending_baseline >= 0
-                    && ((pending_drop >= phaseStartMinDrop && pending_held >= phaseStartConfirmSeconds * 1000)
-                     || (pending_drop >= 0.05 && pending_held >= phaseStartConfirmSeconds * 3000)))
+                pending_confirmed := pending_baseline >= 0
+                    && pending_drop >= Min(phaseStartMinDrop, 0.05)
+                    && pending_held >= phaseStartConfirmSeconds * 1000
+                ; a confirmed collapse bigger than any real tick of damage
+                ; with NO boss name on screen is a menu's false bar sneaking
+                ; past the envelope (the fast reading sees it 1.2s before the
+                ; quarantine can) - don't start a phase on it; restart the
+                ; confirm window so the ocr re-checks in another 0.5s.
+                ; mega-burns keep their name on screen, so they pass
+                if (pending_confirmed && pending_drop > maxInstantDropPercent && ocr_detect_name() = "")
+                {
+                    pending_confirmed := false
+                    pending_drop_tick := A_TickCount
+                }
+                if (pending_confirmed)
                 {
                     ; confirmed: backdate the timer to when the drop was first seen and
                     ; seed the damage dealt up to the previous tick (this tick's delta
@@ -1932,13 +2096,22 @@ calculateDPS(bossName)
                     ; the total is recomputed from this baseline every tick, so
                     ; no explicit seed (and no double count)
                     total_damage := 0
-                    phase_min_hp := pending_baseline
+                    ; seed the phase minimum from the fast reading so the
+                    ; confirmed drop shows as damage IMMEDIATELY instead of
+                    ; after the 1.2s envelope catches up (the graph appeared
+                    ; with empty values otherwise). capped 2% under the
+                    ; baseline: the enveloped reading still sits at the
+                    ; baseline, and a gap > 2% would trip the rise-rollback
+                    phase_min_hp := Max(fast_hp, pending_baseline - 2)
                     phase_total_baseline := pending_baseline
                     phase_start_baseline := pending_baseline
                     phase_peak_dps := 0
                     phase_killed := 0
                     peak_hist := []
                     burst_hist := []
+                    last_damage_event_tick := 0
+                    damage_gap_s := 0
+                    dps_effective_window := Max(dpsWindowSeconds, 0.2)
                     phase_ttfd := Round(Max(dps_start_time - bar_seen_tick, 0) / 1000, 1)
                     pending_baseline := -1
                     set_tracker_state("phase")
@@ -1960,6 +2133,9 @@ calculateDPS(bossName)
                 phase_killed := 0
                 peak_hist := []
                 burst_hist := []
+                last_damage_event_tick := 0
+                damage_gap_s := 0
+                dps_effective_window := Max(dpsWindowSeconds, 0.2)
                 phase_ttfd := Round(Max(A_TickCount - bar_seen_tick, 0) / 1000, 1)
                 set_tracker_state("phase")
             }
@@ -1989,15 +2165,47 @@ calculateDPS(bossName)
                 ; only COUNTED damage keeps the phase alive - a glow wobbling
                 ; the reading up and down must not defer the frozen timeout
                 if (total_damage > damage_before)
+                {
                     time_of_last_damage := A_TickCount
+                    ; adaptive dps window: measure how sparse the damage
+                    ; events actually are. real dps counts damage every tick
+                    ; (window stays at dpsWindowSeconds); a trickle weapon on
+                    ; a high-hp boss sheds whole bar columns seconds apart,
+                    ; and a 1s window on 2s-spaced steps reads 2x the real
+                    ; dps whenever two steps land close together. widening
+                    ; the window to ~1.5 gaps makes peak/graph dps honest
+                    if (last_damage_event_tick)
+                    {
+                        gap := (A_TickCount - last_damage_event_tick) / 1000.0
+                        damage_gap_s := damage_gap_s ? 0.7 * damage_gap_s + 0.3 * gap : gap
+                    }
+                    last_damage_event_tick := A_TickCount
+                    dps_effective_window := Max(dpsWindowSeconds, Min(damage_gap_s * 1.5, 5))
+                    ; damage landing right after the bar returned from a menu
+                    ; is the hidden stretch's catch-up lump (teammates kept
+                    ; shooting) - restart the burst/peak windows and the graph
+                    ; so a 15s lump can't read as a one-second burst of
+                    ; millions and poison the peak for the rest of the phase.
+                    ; ONLY after a real blackout (> 2s): sub-second occlusion
+                    ; flickers also pass through the hidden/unhide machinery,
+                    ; and wiping the windows on every flicker starved the
+                    ; graph of samples under normal trickle damage
+                    if (last_unhide_tick && last_hidden_ms > 2000
+                        && A_TickCount - last_unhide_tick < 1500)
+                    {
+                        peak_hist := []
+                        burst_hist := []
+                        graph_samples := []
+                    }
+                }
 
                 ; phase-record fields: rolling peak dps over dpsWindowSeconds
                 ; (graph-independent), and the hp span for the history row
                 peak_hist.Push([A_TickCount, total_damage])
-                while (peak_hist.Length && A_TickCount - peak_hist[1][1] > dpsWindowSeconds * 1000)
+                while (peak_hist.Length && A_TickCount - peak_hist[1][1] > dps_effective_window * 1000)
                     peak_hist.RemoveAt(1)
                 peak_span := (A_TickCount - peak_hist[1][1]) / 1000
-                phase_peak_dps := Max(phase_peak_dps, (total_damage - peak_hist[1][2]) / Max(peak_span, dpsWindowSeconds))
+                phase_peak_dps := Max(phase_peak_dps, (total_damage - peak_hist[1][2]) / Max(peak_span, dps_effective_window))
                 phase_hp_start := phase_total_baseline
                 phase_hp_end := boss_hp_percent
                 ; burst-window samples for the 3s/5s/10s stats, ~10 per second
@@ -2008,16 +2216,22 @@ calculateDPS(bossName)
                 elapsed_time := Round((A_TickCount - dps_start_time) / 1000, 2)  ; Convert from ms to s
 
                 ; calculate the average dps and adjust highest dps if its changed
+                ; burst (highest running average) only counts once the average
+                ; has >= 2s of history: with the instant damage seed, a single
+                ; bar column over a fraction of a second read as a fake
+                ; "burst" of 2-3x the real dps on trickle weapons (one column
+                ; is 2,366 hp on a 1.5M boss at 1080p - the early average is
+                ; pure quantization noise)
                 if (is_default)
                 {
                     current_dps := elapsed_time > 0 ? Round((total_damage / elapsed_time), 3) : 0
-                    if (elapsed_time >= 0.25)
+                    if (elapsed_time >= 2)
                         highest_dps :=  Round((max(highest_dps, current_dps)), 3)
                 }
                 Else
                 {
                     current_dps := elapsed_time > 0 ? Round((total_damage / elapsed_time), 0) : 0
-                    if (elapsed_time >= 0.25)
+                    if (elapsed_time >= 2)
                         highest_dps :=  Round((max(highest_dps, current_dps)), 0)
                 }
 
@@ -2037,8 +2251,11 @@ calculateDPS(bossName)
 
             ; an auto phase whose "damage" fully recovers to the starting hp was
             ; a visual artifact (immune dim, glowing bar section) - dump it and
-            ; the graph with it
-            if (dps_phase_active && phase_start_baseline <= 500 && boss_hp_percent >= phase_start_baseline - 0.01)
+            ; the graph with it. MUST compare the fast (pre-envelope) reading:
+            ; phases now start before the envelope has caught up, so for up to
+            ; 1.2s the enveloped value still sits at the baseline and would
+            ; instantly dump every freshly started phase
+            if (dps_phase_active && phase_start_baseline <= 500 && fast_hp >= phase_start_baseline - 0.01)
             {
                 end_dps_phase(true)
                 pending_baseline := -1
@@ -2062,7 +2279,9 @@ calculateDPS(bossName)
 
             if (dps_phase_active)
             {
-                if (includeDPSCalculations)
+                ; specifiers off hides the burst/sustained numbers too (the
+                ; crosshair mode has no labels, so it keeps its numbers)
+                if (includeDPSCalculations && (includeBurstAndSustainedSpecifiers || DPSatCrosshair))
                 {
                     if (is_default)
                     {
@@ -2084,6 +2303,7 @@ calculateDPS(bossName)
 
             ; update the last boss hp to be the current boss health
             last_boss_hp_percent := boss_hp_percent
+            last_fast_hp := fast_hp
             Gdip_DisposeImage(pBitmap)
             Sleep 30
         }
@@ -2353,36 +2573,66 @@ auto_detect_tick()
 {
     global autoDetectBoss, dps_phase_active, currently_shown, tracking_active
     global current_boss, switch_to_boss, healthbar_location, stop_loop
-    static idle_misses := 0
+    static nobar_since := 0, noname_since := 0
     if (!autoDetectBoss || dps_phase_active || !currently_shown)
     {
-        idle_misses := 0
+        nobar_since := 0
+        noname_since := 0
         return
     }
     pBitmap := Gdip_BitmapFromScreen(healthbar_location)
     bar_visible := bossHealthPercentage(pBitmap) > 0
     Gdip_DisposeImage(pBitmap)
-    ; watchdog: an idle tracker (no phase running) that sees no bar, or
-    ; something bar-like without a boss name over it (the turquoise xp bar
-    ; creeping through the bar row), for 3 straight checks is stale - flush
-    ; it back to the launch idle state; detection re-acquires the next boss
+    ; watchdog, time-based so it's independent of the check interval: an idle
+    ; tracker (no phase running) that sees no bar CONTINUOUSLY for 30s is
+    ; stale - flush it back to the launch idle state; detection re-acquires
+    ; the next boss. 30s is long enough that browsing the inventory (bar
+    ; hidden the whole time) never trips it. a bar that IS on screen with an
+    ; unreadable name is NOT stale: long mechanics stretches leave the bar
+    ; frozen and the name obscured by effects/damage numbers for minutes -
+    ; only something bar-like with no name for 5 straight minutes (the
+    ; turquoise xp bar creeping through the bar row) gets flushed
     match := bar_visible ? ocr_detect_name() : ""
     if (match = "")
     {
         if (tracking_active)
         {
-            idle_misses += 1
-            if (idle_misses >= 3)
+            if (!bar_visible)
             {
-                idle_misses := 0
-                stop_loop := 1
-                ToolTip "Boss tracker reset (no boss on screen)", 100, 100
-                SetTimer(clear_tooltip, -2000)
+                noname_since := 0
+                if (!nobar_since)
+                    nobar_since := A_TickCount
+                if (A_TickCount - nobar_since >= 30000)
+                {
+                    nobar_since := 0
+                    stop_loop := 1
+                    ToolTip "Boss tracker reset (no boss on screen)", 100, 100
+                    SetTimer(clear_tooltip, -2000)
+                }
             }
+            else
+            {
+                nobar_since := 0
+                if (!noname_since)
+                    noname_since := A_TickCount
+                if (A_TickCount - noname_since >= 300000)
+                {
+                    noname_since := 0
+                    stop_loop := 1
+                    ToolTip "Boss tracker reset (bar without a boss name)", 100, 100
+                    SetTimer(clear_tooltip, -2000)
+                }
+            }
+        }
+        else
+        {
+            nobar_since := 0
+            noname_since := 0
         }
         return
     }
-    idle_misses := 0
+    nobar_since := 0
+    noname_since := 0
     if (tracking_active)
     {
         if (match != current_boss)
